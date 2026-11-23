@@ -1,0 +1,29 @@
+name: Unzip site files
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract site files
+        run: |
+          unzip -o sp-papiya-fashion-github.zip
+          rm sp-papiya-fashion-github.zip
+          ls -la
+          ls -la assets assets/opt
+          test -f assets/opt/p01.jpg
+          test -f index.html
+          test -f CNAME
+          test -f .nojekyll
+          cat CNAME
+      - name: Commit extracted files
+        run: |
+          git config user.name "arian231"
+          git config user.email "arian231@users.noreply.github.com"
+          git add -A
+          git status --short
+          git commit -m "Extract site files from zip" || echo "nothing to commit"
+          git push
