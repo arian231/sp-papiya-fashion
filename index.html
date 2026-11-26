@@ -20,6 +20,8 @@
 <link rel="icon" type="image/jpeg" href="assets/opt/logo.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="preconnect" href="https://coscmcajdrznjnuapgwi.supabase.co">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Bengali:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 /* ═══════════════════════════════════════════════════════════════
@@ -725,7 +727,9 @@ input, select, textarea { max-width: 100%; }
 <!-- ══════════ Toast ══════════ -->
 <div id="toastWrap" class="toast-wrap" aria-live="polite"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- Supabase library loads deferred so it never blocks the first paint;
+     app.js creates the client lazily on first use (getSupabase). -->
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 /* ═══════════════════════════════════════════════════════════════
    SP PAPIYA FASHION — app.js (part 1: utils, data, store)
@@ -745,8 +749,10 @@ const uid = p => (p || 'id') + Date.now().toString(36) + Math.floor(Math.random(
 const FALLBACK_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#eeeeee"/><stop offset="1" stop-color="#cccccc"/></linearGradient></defs><rect width="600" height="800" fill="url(#g)"/><text x="300" y="400" font-size="34" text-anchor="middle" fill="#111111" font-family="sans-serif">SP PAPIYA FASHION</text></svg>');
 window.imgErr = el => { el.onerror = null; el.src = FALLBACK_IMG; };
-const IMG = (src, alt, cls) =>
-  '<img src="' + esc(src) + '" alt="' + esc(alt || '') + '"' + (cls ? ' class="' + cls + '"' : '') + ' loading="lazy" onerror="imgErr(this)">';
+/* Fast-load: above-the-fold images load eager (with fetchpriority), everything
+   else lazy. decoding="async" keeps image decode off the main thread. */
+const IMG = (src, alt, cls, eager) =>
+  '<img src="' + esc(src) + '" alt="' + esc(alt || '') + '"' + (cls ? ' class="' + cls + '"' : '') + (eager ? ' loading="eager" fetchpriority="high"' : ' loading="lazy"') + ' decoding="async" onerror="imgErr(this)">';
 const BD_PHONE_RE = /^01[3-9][0-9]{8}$/;
 const validBDPhone = p => BD_PHONE_RE.test(String(p || '').replace(/[\s-]/g, ''));
 /* Demo-grade hash (not real security — real auth needs a backend). */
@@ -843,37 +849,47 @@ const SUPABASE_URL = 'https://coscmcajdrznjnuapgwi.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_FDiAkxqUVrQWq8eBjwEERQ_UD1o_rZ2';
 const ADMIN_AUTH_EMAIL = 'mdariankhan667@gmail.com';
 let papiyaSupabase = null, cloudReady = false, cloudWriteTimer = null, cloudBusy = false, cloudCatalogLoaded = false;
-try {
-  if (window.supabase && window.supabase.createClient) {
-    papiyaSupabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
-  }
-} catch (e) { console.warn('Supabase client could not start', e); }
+/* Fast-load: the Supabase library loads with defer, so the client is created
+   lazily on first use instead of at script load. If the library failed to
+   load, the shop still works from local/seed data. */
+function getSupabase() {
+  if (papiyaSupabase) return papiyaSupabase;
+  try {
+    if (window.supabase && window.supabase.createClient) {
+      papiyaSupabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+    }
+  } catch (e) { console.warn('Supabase client could not start', e); }
+  return papiyaSupabase;
+}
 const cloudPayload = () => ({ products: LS.get('products', null), settings: LS.get('settings', null) });
 const privateCloudPayload = () => ({ orders: LS.get('orders', []), users: LS.get('users', []) });
 function scheduleCloudSave() {
-  if (!cloudReady || cloudBusy || !papiyaSupabase || sessionStorage.getItem('papiya_admin') !== '1') return;
+  if (!cloudReady || cloudBusy || sessionStorage.getItem('papiya_admin') !== '1') return;
   clearTimeout(cloudWriteTimer);
   cloudWriteTimer = setTimeout(async () => {
+    const sb = getSupabase();
+    if (!sb) return;
     try {
-      const { data: { session } } = await papiyaSupabase.auth.getSession();
+      const { data: { session } } = await sb.auth.getSession();
       if (!session || (session.user.email || '').toLowerCase() !== ADMIN_AUTH_EMAIL) return;
-      const { error } = await papiyaSupabase.from('papiya_site_state').upsert({ id: 'main', ...cloudPayload(), updated_at: new Date().toISOString() });
+      const { error } = await sb.from('papiya_site_state').upsert({ id: 'main', ...cloudPayload(), updated_at: new Date().toISOString() });
       if (error) { console.error('Cloud save failed:', error.message); return; }
-      const { error: privateError } = await papiyaSupabase.from('papiya_private_state').upsert({ id: 'main', ...privateCloudPayload(), updated_at: new Date().toISOString() });
+      const { error: privateError } = await sb.from('papiya_private_state').upsert({ id: 'main', ...privateCloudPayload(), updated_at: new Date().toISOString() });
       if (privateError) console.error('Private cloud save failed:', privateError.message);
       const orders = LS.get('orders', []);
       if (orders.length) {
         const rows = orders.map(o => ({ id: String(o.id), order_data: o, updated_at: new Date().toISOString() }));
-        const { error: orderError } = await papiyaSupabase.from('papiya_orders').upsert(rows, { onConflict: 'id' });
+        const { error: orderError } = await sb.from('papiya_orders').upsert(rows, { onConflict: 'id' });
         if (orderError) console.error('Order cloud sync failed:', orderError.message);
       }
     } catch (e) { console.error('Cloud save failed:', e); }
   }, 650);
 }
 async function loadCloudState() {
-  if (!papiyaSupabase) return;
+  const sb = getSupabase();
+  if (!sb) return;
   try {
-    const { data, error } = await papiyaSupabase.from('papiya_site_state').select('products,settings').eq('id', 'main').maybeSingle();
+    const { data, error } = await sb.from('papiya_site_state').select('products,settings').eq('id', 'main').maybeSingle();
     if (error) { console.warn('Cloud state not loaded:', error.message); return; }
     if (data) {
       cloudBusy = true;
@@ -884,13 +900,14 @@ async function loadCloudState() {
   } catch (e) { cloudBusy = false; console.warn('Cloud state not loaded', e); }
 }
 async function syncAfterAdminLogin() {
-  if (!papiyaSupabase) { toast('Supabase connection not found. Check your internet and setup.', 'warn'); return false; }
-  const { data: { session } } = await papiyaSupabase.auth.getSession();
+  const sb = getSupabase();
+  if (!sb) { toast('Supabase connection not found. Check your internet and setup.', 'warn'); return false; }
+  const { data: { session } } = await sb.auth.getSession();
   if (!session || (session.user.email || '').toLowerCase() !== ADMIN_AUTH_EMAIL) {
     sessionStorage.removeItem('papiya_admin');
     toast('Please log in with the Supabase Admin email.', 'warn'); return false;
   }
-  const { data, error } = await papiyaSupabase.from('papiya_site_state').select('products,settings').eq('id', 'main').maybeSingle();
+  const { data, error } = await sb.from('papiya_site_state').select('products,settings').eq('id', 'main').maybeSingle();
   if (error) { sessionStorage.removeItem('papiya_admin'); toast('Cloud data could not be read: ' + error.message, 'warn'); return false; }
   const hasCloudData = data && (Array.isArray(data.products) || data.settings);
   if (hasCloudData) {
@@ -898,20 +915,20 @@ async function syncAfterAdminLogin() {
     ['products', 'settings'].forEach(k => { if (data[k] != null) localStorage.setItem('papiya_' + k, JSON.stringify(data[k])); });
     cloudBusy = false;
   } else {
-    const { error: saveError } = await papiyaSupabase.from('papiya_site_state').upsert({ id: 'main', ...cloudPayload(), updated_at: new Date().toISOString() });
+    const { error: saveError } = await sb.from('papiya_site_state').upsert({ id: 'main', ...cloudPayload(), updated_at: new Date().toISOString() });
     if (saveError) { sessionStorage.removeItem('papiya_admin'); toast('First cloud save failed: ' + saveError.message, 'warn'); return false; }
   }
-  const { data: privateData, error: privateError } = await papiyaSupabase.from('papiya_private_state').select('orders,users').eq('id', 'main').maybeSingle();
+  const { data: privateData, error: privateError } = await sb.from('papiya_private_state').select('orders,users').eq('id', 'main').maybeSingle();
   if (privateError) { sessionStorage.removeItem('papiya_admin'); toast('Private cloud data could not be read: ' + privateError.message, 'warn'); return false; }
   if (privateData && (privateData.orders != null || privateData.users != null)) {
     cloudBusy = true;
     ['orders', 'users'].forEach(k => { if (privateData[k] != null) localStorage.setItem('papiya_' + k, JSON.stringify(privateData[k])); });
     cloudBusy = false;
   } else {
-    const { error: privateSaveError } = await papiyaSupabase.from('papiya_private_state').upsert({ id: 'main', ...privateCloudPayload(), updated_at: new Date().toISOString() });
+    const { error: privateSaveError } = await sb.from('papiya_private_state').upsert({ id: 'main', ...privateCloudPayload(), updated_at: new Date().toISOString() });
     if (privateSaveError) { sessionStorage.removeItem('papiya_admin'); toast('First private cloud save failed: ' + privateSaveError.message, 'warn'); return false; }
   }
-  const { data: orderRows, error: orderLoadError } = await papiyaSupabase.from('papiya_orders').select('order_data').order('created_at', { ascending: false });
+  const { data: orderRows, error: orderLoadError } = await sb.from('papiya_orders').select('order_data').order('created_at', { ascending: false });
   if (orderLoadError) { sessionStorage.removeItem('papiya_admin'); toast('Orders could not be read from the cloud: ' + orderLoadError.message, 'warn'); return false; }
   if (Array.isArray(orderRows) && orderRows.length) {
     const merged = new Map();
@@ -1127,13 +1144,16 @@ function colorSwatches(p) {
 }
 
 /* ── Product card (Yellow-style) ───────────────────────── */
-function productCard(p, flash) {
+/* Fast-load: `eager` marks first-row (above-the-fold) cards so their photo
+   loads immediately; all other cards stay lazy. The hover second image is
+   always lazy — it is only needed on hover. */
+function productCard(p, flash, eager) {
   const gallery = productImages(p);
   const hoverImg = gallery.length > 1 ? gallery[1] : '';
   const wished = inWishlist(p.id) ? ' active' : '';
   return '<article class="p-card' + (flash ? ' flash-card' : '') + '">' +
-    '<div class="p-media"><a href="#/product/' + p.id + '" class="p-media-link" aria-label="' + esc(p.name) + '">' + IMG(p.img, p.name) +
-    (hoverImg ? '<img src="' + esc(hoverImg) + '" alt="" class="p-media-hover" loading="lazy" onerror="imgErr(this)">' : '') +
+    '<div class="p-media"><a href="#/product/' + p.id + '" class="p-media-link" aria-label="' + esc(p.name) + '">' + IMG(p.img, p.name, null, eager) +
+    (hoverImg ? '<img src="' + esc(hoverImg) + '" alt="" class="p-media-hover" loading="lazy" decoding="async" onerror="imgErr(this)">' : '') +
     '</a>' +
     '<button class="wish-btn' + wished + '" data-wish="' + p.id + '" onclick="toggleWishlist(\'' + p.id + '\')" aria-label="Add to wishlist">' +
     '<svg viewBox="0 0 24 24" fill="' + (inWishlist(p.id) ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="1.8"><path d="M12 21C7 16.5 3 13 3 8.8 3 6 5.2 4 7.8 4c1.7 0 3.2.9 4.2 2.3C13 4.9 14.5 4 16.2 4 18.8 4 21 6 21 8.8c0 4.2-4 7.7-9 12.2z"/></svg></button>' +
@@ -1203,7 +1223,7 @@ function viewHome() {
     '<h1>' + esc(h.t1) + ' <span class="hl">' + esc(h.hl) + '</span> ' + esc(h.t2) + '</h1>' +
     '<p>' + esc(h.sub) + '</p>' +
     '<a href="' + esc(h.link || '#/shop') + '" class="btn btn-primary" style="flex:none;padding:.8rem 2rem">' + esc(h.cta || 'Shop Now') + '</a></div>' +
-    '<div class="hero-img">' + IMG(h.img, h.title || h.kicker) + '</div></div>'
+    '<div class="hero-img">' + IMG(h.img, h.title || h.kicker, null, i === 0) + '</div></div>'
   ).join('');
 
   return '<div class="hero"><div id="heroSlides">' + heroSlides + '</div>' +
@@ -1230,7 +1250,7 @@ function viewHome() {
       '<span class="flash-title">Flash Sale</span>' +
       '<div class="countdown" id="flashCountdown"><span class="cd"><b id="cdH">00</b><small>Hours</small></span>:<span class="cd"><b id="cdM">00</b><small>Minutes</small></span>:<span class="cd"><b id="cdS">00</b><small>Seconds</small></span></div>' +
       '<a href="#/shop?flash=1" class="see-all" style="color:#fff;margin-left:auto">View All Offers →</a></div>' +
-      '<div class="flash-row">' + flashItems.map(p => productCard(p, true)).join('') + '</div></div></section>' : '') +
+      '<div class="flash-row">' + flashItems.map((p, i) => productCard(p, true, i < 4)).join('') + '</div></div></section>' : '') +
 
     '<section class="section"><div class="section-head"><h2 class="section-title">Offers</h2></div>' +
     '<div class="promo-grid">' + s.promos.map(pb =>
@@ -1240,10 +1260,10 @@ function viewHome() {
     ).join('') + '</div></section>' +
 
     '<section class="section"><div class="section-head"><h2 class="section-title">New Collection</h2><a class="see-all" href="#/shop?sort=new">View All →</a></div>' +
-    '<div class="p-grid">' + newItems.map(p => productCard(p)).join('') + '</div></section>' +
+    '<div class="p-grid">' + newItems.map((p, i) => productCard(p, false, i < 4)).join('') + '</div></section>' +
 
     '<section class="section"><div class="section-head"><h2 class="section-title">Best Sellers</h2><a class="see-all" href="#/shop?sort=popular">View All →</a></div>' +
-    '<div class="p-grid">' + bestItems.map(p => productCard(p)).join('') + '</div></section>' +
+    '<div class="p-grid">' + bestItems.map((p, i) => productCard(p, false, i < 4)).join('') + '</div></section>' +
 
     '<section class="section" id="policy"><div class="policy-strip"><h3>Delivery & Return Policy</h3>' +
     '<ul><li>Delivery charge inside Dhaka ' + fmtTk(s.delivery.inside) + ', outside Dhaka ' + fmtTk(s.delivery.outside) + '.</li>' +
@@ -1340,7 +1360,7 @@ function viewShop(params) {
     '<option value="old"' + (sort === 'old' ? ' selected' : '') + '>Date: Old to New</option></select></div></div>' +
     '<div class="result-count">' + items.length + ' products</div>' +
     (items.length
-      ? '<div class="p-grid">' + items.map(p => productCard(p, flash)).join('') + '</div>'
+      ? '<div class="p-grid">' + items.map((p, i) => productCard(p, flash, i < 4)).join('') + '</div>'
       : '<div class="empty-state"><span class="e-ico">🔍</span><h3>No products found</h3><p>Try a different search or filter</p></div>') +
     '</section></div>';
 }
@@ -1386,9 +1406,9 @@ function viewProduct(id) {
   const related = DB.products.filter(x => x.cat === p.cat && x.id !== p.id).slice(0, 4);
   const gallery = productImages(p);
   return '<div class="wrap"><div class="pd-wrap">' +
-    '<div class="pd-gallery"><div class="pd-main-img"><img id="pdMainImg" src="' + esc(gallery[0] || FALLBACK_IMG) + '" onerror="imgErr(this)" alt="' + esc(p.name) + '"></div>' +
+    '<div class="pd-gallery"><div class="pd-main-img"><img id="pdMainImg" src="' + esc(gallery[0] || FALLBACK_IMG) + '" decoding="async" fetchpriority="high" onerror="imgErr(this)" alt="' + esc(p.name) + '"></div>' +
     (gallery.length > 1 ? '<div class="pd-thumbs" id="pdThumbs">' + gallery.map((g, i) =>
-      '<button class="pd-thumb' + (i === 0 ? ' on' : '') + '" data-idx="' + i + '" aria-label="Photo ' + (i + 1) + '"><img src="' + esc(g) + '" onerror="imgErr(this)" alt=""></button>').join('') + '</div>' : '') + '</div>' +
+      '<button class="pd-thumb' + (i === 0 ? ' on' : '') + '" data-idx="' + i + '" aria-label="Photo ' + (i + 1) + '"><img src="' + esc(g) + '" loading="lazy" decoding="async" onerror="imgErr(this)" alt=""></button>').join('') + '</div>' : '') + '</div>' +
     '<div class="pd-info">' +
     '<span class="p-cat">' + catName(p.cat) + '</span>' +
     '<h1>' + esc(p.name) + '</h1>' +
@@ -1598,8 +1618,9 @@ async function placeOrder() {
     timeline: [{ s: 'pending', t: Date.now() }]
   };
   /* Save the order through a restricted server function; guests never get read access. */
-  if (!papiyaSupabase) { toast('Order could not be sent to the server. Check your internet connection.', 'warn'); return; }
-  const { error: orderSaveError } = await papiyaSupabase.rpc('papiya_submit_order', { order_payload: order });
+  const sb = getSupabase();
+  if (!sb) { toast('Order could not be sent to the server. Check your internet connection.', 'warn'); return; }
+  const { error: orderSaveError } = await sb.rpc('papiya_submit_order', { order_payload: order });
   if (orderSaveError) { console.error('Order submit failed:', orderSaveError.message); toast('Order was not saved to the server: ' + orderSaveError.message, 'warn'); return; }
   const orders = DB.orders;
   orders.unshift(order);
@@ -1649,8 +1670,9 @@ function initTrack() {
     res.innerHTML = '<div class="form-card">Checking the latest status of your order…</div>';
     let o = null;
     // Supabase is authoritative. Never display a stale local pending status when the cloud lookup fails.
-    if (papiyaSupabase) {
-      const { data, error } = await papiyaSupabase.rpc('papiya_track_order', { order_id: id, customer_phone: phone });
+    const sb = getSupabase();
+    if (sb) {
+      const { data, error } = await sb.rpc('papiya_track_order', { order_id: id, customer_phone: phone });
       if (error) {
         console.error('Cloud order tracking failed:', error.message);
         res.innerHTML = '<div class="form-card" style="text-align:center;color:#c62828">Latest status could not be loaded. Check your internet connection and try again.</div>';
@@ -1821,8 +1843,9 @@ function initAdmin() {
         toast('Admin login is not allowed with this email.', 'warn');
         return;
       }
-      if (!papiyaSupabase) { toast('Supabase connection not found.', 'warn'); return; }
-      const { error } = await papiyaSupabase.auth.signInWithPassword({ email, password: pass });
+      const sb = getSupabase();
+      if (!sb) { toast('Supabase connection not found.', 'warn'); return; }
+      const { error } = await sb.auth.signInWithPassword({ email, password: pass });
       if (error) {
         $('#adPass').closest('.field').classList.add('invalid');
         $('#adEmail').closest('.field').classList.add('invalid');
@@ -2054,8 +2077,9 @@ async function setOrderStatus(id, st) {
   if (!o.timeline.find(t => t.s === st)) o.timeline.push({ s: st, t: Date.now() });
   DB.orders = orders;
   // Persist the changed status directly so customer tracking on another device updates too.
-  if (papiyaSupabase && cloudReady) {
-    const { error } = await papiyaSupabase.from('papiya_orders').upsert({ id: String(o.id), order_data: o, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+  const sb = getSupabase();
+  if (sb && cloudReady) {
+    const { error } = await sb.from('papiya_orders').upsert({ id: String(o.id), order_data: o, updated_at: new Date().toISOString() }, { onConflict: 'id' });
     if (error) { console.error('Order status cloud update failed:', error.message); toast('Status changed, but it was not saved to the cloud: ' + error.message, 'warn'); return; }
   }
   toast('Order ' + id + ' → ' + ORDER_STATUS[st], 'ok');
@@ -2442,16 +2466,36 @@ function route() {
   updateBadges();
 }
 
-/* ── Init ──────────────────────────────────────────── */
-document.addEventListener('DOMContentLoaded', async () => {
-  /* Load shared cloud data before creating local defaults. */
+/* Background cloud sync: fetch shared cloud data AFTER the first paint and
+   refresh the view only if it actually changed something. Form pages
+   (checkout, cart, account, admin) are never re-rendered mid-use, so typed
+   input is never lost. The v2-seed stale-catalog clear from the old boot
+   flow now runs here, after the cloud result is known. */
+async function syncCloudInBackground() {
+  const beforeP = localStorage.getItem('papiya_products');
+  const beforeS = localStorage.getItem('papiya_settings');
   await loadCloudState();
-  /* v2 seed: clears any stale cached catalog from older builds */
   if (LS.get('seed_v', 0) !== 2) {
-    if (!cloudCatalogLoaded) { LS.del('products'); LS.del('settings'); }
+    if (!cloudCatalogLoaded) { LS.del('products'); LS.del('settings'); void DB.products; void DB.settings; }
     LS.set('seed_v', 2);
   }
-  /* seed DB on first run */
+  migrateStore();
+  const afterP = localStorage.getItem('papiya_products');
+  const afterS = localStorage.getItem('papiya_settings');
+  if (afterP !== beforeP || afterS !== beforeS) {
+    applySettingsToChrome();
+    renderAnnouncement();
+    const r = (parseHash().segs[0] || '');
+    if (r === '' || r === 'shop' || r === 'product' || r === 'wishlist') route();
+    else updateBadges();
+  }
+}
+
+/* ── Init ──────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  /* Fast-load: render instantly from local/seed data. The cloud fetch runs
+     in the background afterwards (see syncCloudInBackground) and never
+     blocks the first paint. */
   void DB.products; void DB.settings;
   migrateStore();
   applySettingsToChrome();
@@ -2485,6 +2529,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   window.addEventListener('hashchange', route);
   route();
+  /* Cloud sync in the background — never blocks the first paint. */
+  syncCloudInBackground();
 });
 
 </script>
